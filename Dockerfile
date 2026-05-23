@@ -1,37 +1,43 @@
-# Stage 1: Build your Gradle application using an official Ubuntu image environment
+# Stage 1: Build using an official Ubuntu environment
 FROM ubuntu:22.04 AS build
 WORKDIR /app
 
-# Install standard networking utilities and compiler tools
-RUN apt-get update && apt-get install -y curl unzip wget
+# 1. Install necessary security and archive utilities
+RUN apt-get update && apt-get install -y wget apt-transport-https gnupg
 
-# Download and install Eclipse Temurin OpenJDK 26 manually inside the build engine
-RUN wget https://github.com/adoptium/temurin26-binaries/releases/download/jdk-26%2B0/OpenJDK26-jdk_x64_linux_hotspot_26_0.tar.gz && \
-    tar -xzf OpenJDK26-jdk_x64_linux_hotspot_26_0.tar.gz && \
-    mv jdk-26* /opt/java26
+# 2. Register Adoptium's official security GPG key ring and software repository
+RUN wget -qO - https://packages.adoptium.net/artifactory/api/gpg/key/public | apt-key add - && \
+    echo "deb https://packages.adoptium.net/artifactory/deb jammy main" | tee /etc/apt/sources.list.d/adoptium.list
 
-# Assign environment routing paths to point to our newly installed Java 26 home
-ENV JAVA_HOME=/opt/java26
+# 3. Update repositories and install the native Java 26 JDK compilation toolchain package
+RUN apt-get update && apt-get install -y temurin-26-jdk
+
+# Define standard system routing variables pointing to the new Java 26 installation location
+ENV JAVA_HOME=/usr/lib/jvm/temurin-26-jdk-amd64
 ENV PATH="$JAVA_HOME/bin:$PATH"
 
-# Copy your local configuration project files over to the working layout directory
+# Copy local Gradle wrapper and source modules
 COPY build.gradle settings.gradle* gradlew ./
 COPY gradle ./gradle
 COPY src ./src
 
-# Compile the target production binary standalone jar
+# Compile the production executable fat JAR
 RUN ./gradlew bootJar -x test --no-daemon
 
-# Stage 2: Deploy using a clean base distribution layer
+# Stage 2: Deploy using a clean, ultra-lightweight distribution layer
 FROM ubuntu:22.04
 WORKDIR /app
 
-# Copy the Java 26 installation directly out of the build stage to keep runtime lightweight
-COPY --from=build /opt/java26 /opt/java26
-ENV JAVA_HOME=/opt/java26
+# Install runtime utilities, fetch Adoptium keys, and install the headless JRE 26 for production execution
+RUN apt-get update && apt-get install -y wget apt-transport-https gnupg && \
+    wget -qO - https://packages.adoptium.net/artifactory/api/gpg/key/public | apt-key add - && \
+    echo "deb https://packages.adoptium.net/artifactory/deb jammy main" | tee /etc/apt/sources.list.d/adoptium.list && \
+    apt-get update && apt-get install -y temurin-26-jre
+
+ENV JAVA_HOME=/usr/lib/jvm/temurin-26-jre-amd64
 ENV PATH="$JAVA_HOME/bin:$PATH"
 
-# Copy the freshly compiled Gradle executable standalone fat JAR
+# Copy the compiled JAR artifact straight out of the build container sandbox
 COPY --from=build /app/build/libs/*-SNAPSHOT.jar app.jar
 
 EXPOSE 8080
