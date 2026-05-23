@@ -1,19 +1,19 @@
-# Stage 1: Build the application using Gradle
-FROM gradle:8-jdk17 AS build
+# Stage 1: Build the application using Gradle with Java 26 support
+FROM gradle:jdk-26 AS build
 WORKDIR /app
 
-# FIX 1: Use wildcards so it grabs settings.gradle OR settings.gradle.kts automatically!
+# Copy configuration files to utilize cache matching rules
 COPY build.gradle settings.gradle* ./
 COPY src ./src
 
-# FIX 2: Explicitly pass the bootJar command and disable the plain jar build artifact
-RUN gradle bootJar -x test --no-daemon
+# Execute compilation using explicit error tracking flags
+RUN gradle bootJar -x test --no-daemon --stacktrace --warning-mode all
 
-# Stage 2: Create the lightweight production container runtime
-FROM eclipse-temurin:17-jre-jammy
+# Stage 2: Create a lightweight runtime environment using Java 26
+FROM openjdk:26-jdk-slim
 WORKDIR /app
 
-# FIX 3: Point directly to the bootJar build directory location layout
+# Point directly to the compiled .jar artifact destination folder
 COPY --from=build /app/build/libs/*-SNAPSHOT.jar app.jar
 
 EXPOSE 8080
