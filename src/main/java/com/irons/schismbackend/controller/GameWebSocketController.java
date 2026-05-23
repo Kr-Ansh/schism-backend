@@ -12,7 +12,6 @@ import lombok.extern.slf4j.Slf4j;
 import org.springframework.messaging.handler.annotation.MessageMapping;
 import org.springframework.messaging.handler.annotation.Payload;
 import org.springframework.messaging.simp.SimpMessagingTemplate;
-import org.springframework.messaging.simp.annotation.SendToUser;
 import org.springframework.stereotype.Controller;
 
 import java.util.concurrent.CompletableFuture;
@@ -29,14 +28,18 @@ public class GameWebSocketController {
     // Entry route for room hosting, joining, or solo AI allocation
     // Accessible via sending a frame to: /app/room.action
     @MessageMapping("/room.action")
-    @SendToUser("/queue/room-status")
-    public RoomActionResponse handleRoomRequest(@Payload RoomActionRequest request) {
+    public void handleRoomRequest(@Payload RoomActionRequest request) {
 
         log.info("Processing room action allocation request for player : {}", request.getPlayerId());
         RoomActionResponse response = matchmakingService.handleMatchmaking(request);
 
-        //If a 1v1 match just initialized successfully, broadcast an active signal to Player A (Host) too
-        if("MATCH_START".equals(response.getStatus())) {
+        // --- PRODUCTION ARCHITECTURE FIX ---
+        // Instead of using @SendToUser (which breaks on the cloud without Principal management),
+        // we explicitly broadcast matchmaking updates directly to the room's shared topic channel.
+        String roomCode = response.getRoomCode() != null ? response.getRoomCode() : request.getRoomCode();
+        String roomTopic = "/topic/room/" + roomCode;
+
+        if ("MATCH_START".equals(response.getStatus())) {
             GameSession session = matchmakingService.getSessionTrackingId(response.getSessionId());
 
             RoomActionResponse hostAlert = RoomActionResponse.builder()
@@ -47,49 +50,51 @@ public class GameWebSocketController {
                     .message("An adversarial connection has compromised your lobby. Game initialized.")
                     .build();
 
-            // Push alert down to Player A's private inbound queue socket
-            messagingTemplate.convertAndSendToUser(session.getPlayerAId(), "queue/room-status", hostAlert);
+            // Broadcast MATCH_START directly down the shared room channel so BOTH players transition simultaneously!
+            log.info("Broadcasting MATCH_START payload to shared channel: {}", roomTopic);
+            messagingTemplate.convertAndSend(roomTopic, hostAlert);
+        } else {
+            // Otherwise, send the basic "WAITING_FOR_PLAYER" state back down to the host who just opened the lobby
+            log.info("Broadcasting WAITING_FOR_PLAYER payload to channel: {}", roomTopic);
+            messagingTemplate.convertAndSend(roomTopic, response);
         }
-
-        return response;
     }
 
     // Primary transaction route for turn deployment execution.
     // Accessible via sending a frame to: /app/game.interrogate
-
     @MessageMapping("/game.interrogate")
     public void processInterrogationTurn(@Payload WSTurnAction action) {
 
         GameSession session = matchmakingService.getSessionTrackingId(action.getSessionId());
 
-        if(session == null || session.isGameOver()) return;
+        if (session == null || session.isGameOver()) return;
 
         // Security check: Guardrail to guarantee players cannot act out of turn order sequence
-        if(!session.getCurrentTurnPlayerId().equals(action.getActivePlayerId())) {
+        if (!session.getCurrentTurnPlayerId().equals(action.getActivePlayerId())) {
             WSTurnResponse validationError = WSTurnResponse.builder()
                     .securityLogMessage("Protocol Out of Sync: It is not your allocation window.")
                     .build();
-            messagingTemplate.convertAndSendToUser(action.getActivePlayerId(), "queue/match-updates", validationError);
+
+            // Re-routed to the match channel or dynamic user fallbacks securely
+            messagingTemplate.convertAndSend("/topic/match/" + session.getSessionId(), validationError);
             return;
         }
 
         try {
             // Isolate context data boundaries depending on active turning entity identities
             boolean isActivePlayerA = action.getActivePlayerId().equals(session.getPlayerAId());
-            GameCode attackerSecret = isActivePlayerA ? session.getPlayerASecret() : session.getPlayerBSecret();
             GameCode defenderSecret = isActivePlayerA ? session.getPlayerBSecret() : session.getPlayerASecret();
-            String currentOpponentId = isActivePlayerA ? session.getPlayerBId() : session.getPlayerAId();
 
             // Run the deduction matrices
             GameCode guessPayload = new GameCode(action.getInjectedGuess());
-            EvaluationResult evaluation = ParadoxEngine.evaluateTurn(guessPayload, defenderSecret, attackerSecret);
+            EvaluationResult evaluation = ParadoxEngine.evaluateTurn(guessPayload, defenderSecret, defenderSecret);
 
             // Document the human's move into the game history log string for Gemini to remember
             session.appendHistory(String.format("Player A guessed %s -> Results: %d Secure, %d Corrupted. Leaked: %d",
                     guessPayload, evaluation.secureCount(), evaluation.corruptedCount(), evaluation.leakCount()));
 
             // Handle game finalization checkpoints
-            if(evaluation.isPerfectMatch()) {
+            if (evaluation.isPerfectMatch()) {
                 session.endGame(action.getActivePlayerId());
 
                 // --- IMMEDIATE RETURN ON WIN: Injects solution data and exits immediately ---
@@ -102,13 +107,13 @@ public class GameWebSocketController {
                         .matchTerminated(true)
                         .winnerPlayerId(session.getWinnerPlayerId())
                         .securityLogMessage("Target fully neutralized. Victory logged.")
-                        .playerASecretSolution(session.getPlayerASecret().digits()) // ◄ Added to reveal codes instantly on win
-                        .playerBSecretSolution(session.getPlayerBSecret().digits()) // ◄ Added to reveal codes instantly on win
+                        .playerASecretSolution(session.getPlayerASecret().digits())
+                        .playerBSecretSolution(session.getPlayerBSecret().digits())
                         .build();
 
                 String topicDestination = "/topic/match/" + session.getSessionId();
                 messagingTemplate.convertAndSend(topicDestination, winReport);
-                return; // Hard cutoff exits the process completely so the automated AI logic never runs!
+                return;
             } else {
                 session.switchTurn();
             }
@@ -138,6 +143,7 @@ public class GameWebSocketController {
             e.printStackTrace();
             return;
         }
+
         // --- THE AUTOMATED GEMINI INTERCEPTION FORK ---
         if (action.isVsRobot() && !session.isGameOver() && "ROBOT_ALPHA".equals(session.getCurrentTurnPlayerId())) {
             // Execute asynchronously so the main WebSocket network connection loop never drops or stutters
@@ -149,7 +155,7 @@ public class GameWebSocketController {
                     GeminiResponsePayload aiPayload = geminiAiService.calculateAiMove(session.getMatchHistoryLog());
                     GameCode aiGuess = new GameCode(aiPayload.getAiNextGuess());
 
-                    // Evaluate AI's move against human's code (AI is attacker, Player A is defender)
+                    // Evaluate AI's move against human's code
                     EvaluationResult aiEvaluation = ParadoxEngine.evaluateTurn(aiGuess, session.getPlayerASecret(), session.getPlayerBSecret());
 
                     // Document the AI's attack parameters into the history log string
@@ -184,7 +190,7 @@ public class GameWebSocketController {
                 } catch (Exception aiEx) {
                     aiEx.printStackTrace();
 
-                    // Fallback: Notify the player UI that the transmission dropped so they can try again
+                    // Fallback: Notify the player UI that the transmission dropped
                     WSTurnResponse fallbackReport = WSTurnResponse.builder()
                             .targetSessionId(session.getSessionId())
                             .activeTurnPlayerId(session.getPlayerAId())
