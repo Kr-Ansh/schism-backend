@@ -15,4 +15,5 @@ public class RoomActionResponse {
     private String roomCode;   // The human-readable 5-character string (e.g., "K7X9R")
     private String status;     // "WAITING_FOR_PLAYER", "MATCH_START", or "AI_READY"
     private String message;    // Informational alert string
+    private String activeTurnPlayerId;
 }

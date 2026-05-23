@@ -43,6 +43,7 @@ public class GameWebSocketController {
                     .sessionId(session.getSessionId())
                     .roomCode(response.getRoomCode())
                     .status("MATCH_START")
+                    .activeTurnPlayerId(session.getCurrentTurnPlayerId())
                     .message("An adversarial connection has compromised your lobby. Game initialized.")
                     .build();
 
