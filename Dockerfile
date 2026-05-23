@@ -1,16 +1,24 @@
-# Stage 1: Build the Maven application package
-FROM maven:3.9-eclipse-temurin-17 AS build
+# Stage 1: Build the application using Gradle
+FROM gradle:8-jdk17 AS build
 WORKDIR /app
-COPY pom.xml .
-COPY src ./src
-RUN mvcw clean package -DskipTests || mvn clean package -DskipTests
 
-# Stage 2: Spin up the slim production container runtime environment
+# Copy the build configuration files first to leverage Docker layer caching
+COPY build.gradle settings.gradle ./
+
+# Copy the actual application source code
+COPY src ./src
+
+# Compile the production executable fat-JAR file, bypassing verification checks
+RUN gradle bootJar -X lint:none -x test
+
+# Stage 2: Create the lightweight production container runtime
 FROM eclipse-temurin:17-jre-jammy
 WORKDIR /app
-COPY --from=build /app/target/*.jar app.jar
 
-# Expose Render's dynamic port allocation hook environment variable
+# Copy the compiled .jar file straight out of the Gradle build stage environment
+COPY --from=build /app/build/libs/*.jar app.jar
+
+# Expose Render's dynamic web service port hook
 EXPOSE 8080
 
 ENTRYPOINT ["java", "-jar", "app.jar"]
