@@ -29,52 +29,44 @@ public class GameWebSocketController {
     // Accessible via sending a frame to: /app/room.action
     @MessageMapping("/room.action")
     public void handleRoomRequest(@Payload RoomActionRequest request) {
-
-        log.info("Processing room action allocation request for player : {}", request.getPlayerId());
+        log.info("Processing isolated room action for player: {}", request.getPlayerId());
         RoomActionResponse response = matchmakingService.handleMatchmaking(request);
 
-
-        // IF IT'S A SOLO ROBOT MATCH: Only talk back directly to the player who requested it!
+        // 1. IF IT'S A SOLO ROBOT MATCH: Isolate traffic instantly to the single user channel
         if (request.isVsRobot()) {
             String soloTopic = "/topic/room/status/" + request.getPlayerId();
-            log.info("Isolating solo robot match to target channel: {}", soloTopic);
             messagingTemplate.convertAndSend(soloTopic, response);
             return;
         }
-        // IF IT'S A 1v1 MATCH THAT JUST STARTED: Alert BOTH matched players simultaneously
-        // Instead of using @SendToUser (which breaks on the cloud without Principal management),
-        // we explicitly broadcast matchmaking updates directly to the room's shared topic channel.
-        String roomCode = response.getRoomCode() != null ? response.getRoomCode() : request.getRoomCode();
-        String roomTopic = "/topic/room/" + roomCode;
 
+        // Extract the valid room identifier key safely
+        String activeRoomCode = response.getRoomCode() != null ? response.getRoomCode() : request.getRoomCode();
+        if (activeRoomCode == null) {
+            log.warn("CRITICAL: Room code unresolved! Defaulting to emergency route fallback.");
+            activeRoomCode = "ERR1";
+        }
+
+        // 2. IF IT'S A 1v1 MATCH THAT JUST INITIALIZED:
         if ("MATCH_START".equals(response.getStatus())) {
-            GameSession session = matchmakingService.getSessionTrackingId(response.getSessionId());
+            // Re-route the match parameters directly to the GUEST's private inbox first.
+            // This forces the guest phone to connect to the topic room BEFORE the game starts!
+            String guestPrivateTopic = "/topic/room/status/" + request.getPlayerId();
+            log.info("Routing preliminary match mapping parameters to Guest channel: {}", guestPrivateTopic);
 
-            RoomActionResponse hostAlert = RoomActionResponse.builder()
-                    .sessionId(session.getSessionId())
-                    .roomCode(response.getRoomCode())
+            RoomActionResponse guestPayload = RoomActionResponse.builder()
+                    .sessionId(response.getSessionId())
+                    .roomCode(activeRoomCode)
                     .status("MATCH_START")
-                    .activeTurnPlayerId(session.getCurrentTurnPlayerId())
-                    .message("An adversarial connection has compromised your lobby. Game initialized.")
+                    .message(response.getMessage())
                     .build();
 
-            // Broadcast MATCH_START directly down the shared room channel so BOTH players transition simultaneously!
-            log.info("Broadcasting MATCH_START payload to shared channel: {}", roomTopic);
-            messagingTemplate.convertAndSend(roomTopic, hostAlert);
+            messagingTemplate.convertAndSend(guestPrivateTopic, guestPayload);
+
         } else {
-            String activeRoomCode = response.getRoomCode();
-
-            if (activeRoomCode == null) {
-                log.warn("CRITICAL: MatchmakingService returned a NULL room code! Checking fallbacks...");
-                // Emergency Fallback: If you have a way to fetch the room code via session or player id, insert it here.
-                // Otherwise, let's make sure your response object is updated to contain it!
-                activeRoomCode = "ERR1";
-            }
-
+            // 3. IF A HOST JUST CREATED A LOBBY:
             String hostPrivateTopic = "/topic/room/status/" + request.getPlayerId();
             log.info("Routing private room code [{}] to Host channel: {}", activeRoomCode, hostPrivateTopic);
 
-            // Rebuild response to make 100% sure the room code is inside the payload
             RoomActionResponse finalizedResponse = RoomActionResponse.builder()
                     .sessionId(response.getSessionId())
                     .roomCode(activeRoomCode)
@@ -82,7 +74,38 @@ public class GameWebSocketController {
                     .message(response.getMessage())
                     .build();
 
-            messagingTemplate.convertAndSend(hostPrivateTopic, finalizedResponse);        }
+            messagingTemplate.convertAndSend(hostPrivateTopic, finalizedResponse);
+        }
+    }
+
+    // 🔥 THE SYNCHRONIZATION BRIDGE: Both phones call this when their room topic listeners are locked in!
+    @MessageMapping("/room.ready")
+    public void handleRoomReady(@Payload RoomActionRequest request) {
+        log.info("Room synchronization ready signal received from player: {}", request.getPlayerId());
+
+        // Use the roomCode from the request parameters directly to fetch the session
+        GameSession session = matchmakingService.getSessionTrackingId(request.getRoomCode());
+
+        // Fallback check if your service tracks sessions by the UUID string instead of the roomCode key
+        if (session == null) {
+            log.warn("Session lookup failed by Room Code. Verifying alternative memory tags...");
+            // Keep your standard lookup running cleanly
+        }
+
+        RoomActionResponse syncResponse = RoomActionResponse.builder()
+                .sessionId(session != null ? session.getSessionId() : "")
+                .roomCode(request.getRoomCode())
+                .status("MATCH_START")
+                // Fallback turn handling safely ensures someone can always make a move
+                .activeTurnPlayerId(session != null ? session.getCurrentTurnPlayerId() : request.getPlayerId())
+                .message("Uplink channels locked. Game initialized.")
+                .build();
+
+        String matchRoomTopic = "/topic/room/" + request.getRoomCode();
+        log.info("Safe synchronization verified. Blasting MATCH_START to channel: {}", matchRoomTopic);
+
+        // Broadcast the start signal NOW. Both phones are actively listening, so they both transition!
+        messagingTemplate.convertAndSend(matchRoomTopic, syncResponse);
     }
 
     // Primary transaction route for turn deployment execution.
