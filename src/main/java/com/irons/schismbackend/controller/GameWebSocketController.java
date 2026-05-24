@@ -33,7 +33,15 @@ public class GameWebSocketController {
         log.info("Processing room action allocation request for player : {}", request.getPlayerId());
         RoomActionResponse response = matchmakingService.handleMatchmaking(request);
 
-        // --- PRODUCTION ARCHITECTURE FIX ---
+
+        // IF IT'S A SOLO ROBOT MATCH: Only talk back directly to the player who requested it!
+        if (request.isVsRobot()) {
+            String soloTopic = "/topic/room/status/" + request.getPlayerId();
+            log.info("Isolating solo robot match to target channel: {}", soloTopic);
+            messagingTemplate.convertAndSend(soloTopic, response);
+            return;
+        }
+        // IF IT'S A 1v1 MATCH THAT JUST STARTED: Alert BOTH matched players simultaneously
         // Instead of using @SendToUser (which breaks on the cloud without Principal management),
         // we explicitly broadcast matchmaking updates directly to the room's shared topic channel.
         String roomCode = response.getRoomCode() != null ? response.getRoomCode() : request.getRoomCode();
