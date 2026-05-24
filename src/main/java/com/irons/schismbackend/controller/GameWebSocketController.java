@@ -56,7 +56,7 @@ public class GameWebSocketController {
         } else {
             // Otherwise, send the basic "WAITING_FOR_PLAYER" state back down to the host who just opened the lobby
             log.info("Broadcasting WAITING_FOR_PLAYER payload to channel: {}", roomTopic);
-            messagingTemplate.convertAndSend(roomTopic, response);
+            messagingTemplate.convertAndSend("/topic/room/status", response);
         }
     }
 
