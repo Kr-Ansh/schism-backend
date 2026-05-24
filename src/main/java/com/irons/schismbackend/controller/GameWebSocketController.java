@@ -62,10 +62,27 @@ public class GameWebSocketController {
             log.info("Broadcasting MATCH_START payload to shared channel: {}", roomTopic);
             messagingTemplate.convertAndSend(roomTopic, hostAlert);
         } else {
-            // Otherwise, send the basic "WAITING_FOR_PLAYER" state back down to the host who just opened the lobby
-            log.info("Broadcasting WAITING_FOR_PLAYER payload to channel: {}", roomTopic);
-            messagingTemplate.convertAndSend("/topic/room/status", response);
-        }
+            String activeRoomCode = response.getRoomCode();
+
+            if (activeRoomCode == null) {
+                log.warn("CRITICAL: MatchmakingService returned a NULL room code! Checking fallbacks...");
+                // Emergency Fallback: If you have a way to fetch the room code via session or player id, insert it here.
+                // Otherwise, let's make sure your response object is updated to contain it!
+                activeRoomCode = "ERR1";
+            }
+
+            String hostPrivateTopic = "/topic/room/status/" + request.getPlayerId();
+            log.info("Routing private room code [{}] to Host channel: {}", activeRoomCode, hostPrivateTopic);
+
+            // Rebuild response to make 100% sure the room code is inside the payload
+            RoomActionResponse finalizedResponse = RoomActionResponse.builder()
+                    .sessionId(response.getSessionId())
+                    .roomCode(activeRoomCode)
+                    .status("WAITING_FOR_PLAYER")
+                    .message(response.getMessage())
+                    .build();
+
+            messagingTemplate.convertAndSend(hostPrivateTopic, finalizedResponse);        }
     }
 
     // Primary transaction route for turn deployment execution.
